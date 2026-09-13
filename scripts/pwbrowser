@@ -1,0 +1,102 @@
+#!/bin/bash
+# pwbrowser —— 在桌面用户的会话里启动一个带 CDP 调试端口的 Chromium，
+#              用的是他本人那个 profile（cookie / 登录态都在里面）。
+#
+# 为什么绕这么一圈：
+#   1. snap 应用不能由 root 直接 fork —— snap-confine 会拒绝，报
+#      "is not a snap cgroup"。必须经由用户自己的 systemd 启动，
+#      也就是桌面应用正常走的那条路。
+#   2. 必须用目标用户身份跑，否则 root 会在他的 profile 里写一堆
+#      root 属主的文件，之后他自己开浏览器就会写不进去。
+#
+# 用法:
+#   pwbrowser                 # 就绪就跳过，没就绪就启动
+#   PWB_CDP_PORT=9223 pwbrowser
+#   PWB_DISPLAY=:11 pwbrowser # 手动指定显示
+set -euo pipefail
+
+TARGET_USER="${PWB_USER:-user}"
+PORT="${PWB_CDP_PORT:-9222}"
+PROFILE="${PWB_PROFILE:-/home/$TARGET_USER/snap/chromium/common/chromium}"
+BROWSER="${PWB_BROWSER:-/snap/bin/chromium}"
+UNIT="${PWB_UNIT:-pwbrowser}"
+WAIT="${PWB_TIMEOUT:-40}"
+XAUTH="${PWB_XAUTHORITY:-/home/$TARGET_USER/.Xauthority}"
+
+UID_TARGET="$(id -u "$TARGET_USER")"
+RUNTIME_DIR="/run/user/$UID_TARGET"
+
+as_user() {
+    runuser -u "$TARGET_USER" -- \
+        env XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" \
+        "$@"
+}
+
+cdp_up() { curl -sf -m 2 "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; }
+
+# 取属于目标用户、编号最大的那个 X socket。
+# xrdp 每次会话分配 :10、:11……；取最大号一般就是最新的那个会话。
+detect_display() {
+    local best="" n owner
+    for s in /tmp/.X11-unix/X*; do
+        [ -e "$s" ] || continue
+        owner="$(stat -c '%U' "$s" 2>/dev/null)" || continue
+        [ "$owner" = "$TARGET_USER" ] || continue
+        n="${s##*X}"
+        best=":$n"
+    done
+    printf '%s' "$best"
+}
+
+if cdp_up; then
+    echo "[=] CDP 已经在 http://127.0.0.1:$PORT 上跑着，不重复启动"
+    exit 0
+fi
+
+DISPLAY_NUM="${PWB_DISPLAY:-$(detect_display)}"
+if [ -z "$DISPLAY_NUM" ]; then
+    echo "[-] 找不到 $TARGET_USER 的 X 显示。" >&2
+    echo "    先敲 shangji 起桌面，并且至少用 RDP 连进去一次。" >&2
+    exit 1
+fi
+
+# Chromium 是单实例的：如果他已经开着一个（没带调试端口），我们再启一个
+# 同 profile 的，新进程只会把参数转发给老进程然后自己退出 —— 端口不会开。
+# 所以必须先把老的关掉。
+if pgrep -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1; then
+    echo "[!] $TARGET_USER 已经开着一个 Chromium，但没带调试端口。"
+    echo "    正在关掉它再重开（标签页会恢复，没提交的表单会丢）。"
+    as_user systemctl --user stop "$UNIT.service" >/dev/null 2>&1 || true
+    pkill -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1 || true
+    sleep 3
+    pkill -9 -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1 || true
+    sleep 1
+fi
+
+echo "[*] 在 $DISPLAY_NUM 上启动 Chromium"
+echo "    用户: $TARGET_USER    profile: $PROFILE    CDP: 127.0.0.1:$PORT"
+
+as_user systemd-run --user --collect --unit="$UNIT" \
+    --setenv=DISPLAY="$DISPLAY_NUM" \
+    --setenv=XAUTHORITY="$XAUTH" \
+    --setenv=HOME="/home/$TARGET_USER" \
+    "$BROWSER" \
+        --remote-debugging-port="$PORT" \
+        --user-data-dir="$PROFILE" \
+        --no-first-run \
+        --no-default-browser-check \
+        --restore-last-session \
+    >/dev/null
+
+for _ in $(seq 1 "$WAIT"); do
+    if cdp_up; then
+        echo "[+] 就绪：CDP 在 http://127.0.0.1:$PORT（显示 $DISPLAY_NUM，用户 $TARGET_USER）"
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "[-] 等了 $WAIT 秒没等到 CDP 端点。看日志：" >&2
+as_user journalctl --user -u "$UNIT" -n 20 --no-pager >&2 2>/dev/null || true
+exit 1

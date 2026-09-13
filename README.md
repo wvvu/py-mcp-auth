@@ -110,23 +110,120 @@ python3 -m venv /opt/mcp-oauth/venv
 
 `deploy/` 里有可直接用的模板：
 
-- `mcp-oauth-gateway.service` — 网关本身
+- `mcp-oauth-gateway.service` — shell 通道的网关
+- `mcp-oauth-browser.service` — 浏览器通道的网关（同一份代码的第二个实例）
 - `mcp-ssh-supergateway.service` — 把 stdio MCP 服务转成 streamableHttp（含 `UMask=0027`）
+- `playwright-mcp.service` — Playwright MCP over CDP
 - `mcp-oauth-admin.fail2ban.conf` — 密码爆破封 IP
 - `mcp-ssh-audit.logrotate` — 审计日志轮转
+- `targets.toml.example` — 浏览器通道管理页里那张「目标」卡片的说明文件
 - `Caddyfile.example` — 反代
+
+`scripts/` 里的运行时脚本（装到 `/usr/local/bin`）：
+
+- `pwbrowser` — 以桌面用户身份启动带 CDP 的浏览器
+- `pwmcp` — 通道开关（`pwmcp-on` / `pwmcp-off` / `pwmcp-status` 软链接到它）
+- `pw-mcp-serve` — systemd 调用的 Playwright MCP 启动器
 
 装完记得 `systemctl daemon-reload`，否则 `systemctl status` 会一直报 "changed on disk"。
 
-## 多资源（一个网关，多个上游）
+## 挂第二条通道：复制一份实例，别改代码
 
-令牌里存了 `resource`，代理时会校验它和当前入口是否一致。要挂第二个上游：
+想再开一个入口（例如把浏览器自动化也暴露给模型），**最省事也最稳的做法是把这个
+网关原样复制一份独立实例**，而不是改代码让它一个进程服务多个上游。
 
-1. 网关侧按入口 Host 分发到不同上游（改 `mcp_proxy` 里的 `UPSTREAM` 选择逻辑）
-2. 把 `MCP_PUBLIC_BASE` 扩成域名白名单，按请求 Host 匹配，匹配不到直接拒
-3. `scope` 拆开（例如 `shell` 和 `browser`），授权页上把「这次授予什么能力」显示出来
+```
+                    ┌─ host.example.com    ─→ 网关:18011 ─→ supergateway:18010 ─→ mcp-ssh-manager
+   Caddy :443 ──────┤
+                    └─ browser.example.com ─→ 网关:18013 ─→ Playwright MCP:18012 ─→ CDP:9222 ─→ 桌面浏览器
+```
 
-**不要**让一个令牌通吃两个上游。浏览器那侧往往带着已登录态，权限面和 shell 不是一回事。
+两个实例的差异**全部通过环境变量表达**，代码一个字都不用动：
+
+| | shell 通道 | browser 通道 |
+|---|---|---|
+| `MCP_OAUTH_PORT` | 18011 | 18013 |
+| `MCP_OAUTH_STATE` | `/etc/mcp-ssh/oauth` | `/etc/mcp-browser/oauth` |
+| `MCP_PUBLIC_BASE` | `https://host.example.com` | `https://browser.example.com` |
+| `MCP_OAUTH_PASSWORD_HINT` | `/root/.mcp-oauth-password` | `/root/.mcp-oauth-browser-password` |
+| `MCP_UPSTREAM` | `:18010/mcp` | `:18012/mcp` |
+
+收益：
+
+- **零风险**：已经在跑的通道一行都不用改，不会因为"加个多域名支持"把现有连接搞挂。
+- **真隔离**：独立状态目录 = 独立令牌库；独立密码；独立端口。哪一边的令牌泄露都跨不过去。
+- **可分别演进**：两边权限面本来就不同（一边是 root shell，一边是你带登录态的浏览器），
+  将来想让它们分叉（比如浏览器侧配更短的令牌 TTL）随时可以。
+
+代价只是多占几十兆内存，以及升级时要重启两个服务。
+
+> 令牌里的 `resource` 字段记录的是签发时的 `{base}/mcp`，代理时会校验是否与当前入口一致。
+> 所以就算将来真的想合并成一个进程，只要给每个入口配一个稳定的 `MCP_PUBLIC_BASE`，
+> 令牌也天然互不通用。
+
+## 浏览器通道（Playwright MCP + CDP 接管桌面浏览器）
+
+`scripts/` 和 `deploy/` 里带了一整套可直接用的东西。它的设计目标是：
+**让模型操作你本人那个浏览器** —— 带着你的 cookie 和登录态，所以不容易撞上反爬验证码，
+而且你在桌面上能实时看到模型在点什么。
+
+```
+browser.example.com
+   → 网关 :18013（本项目，独立实例）
+   → Playwright MCP :18012（--cdp-endpoint，不自己启动浏览器）
+   → CDP :9222
+   → 桌面用户自己那个 Chromium
+```
+
+### 三个脚本
+
+| 脚本 | 作用 |
+|---|---|
+| `pwbrowser` | 以桌面用户身份、在他的 X 显示上启动带 CDP 端口的 Chromium，用他现有的 profile |
+| `pwmcp` | 开关：`on` / `off` / `status` / `browser`（也有 `pwmcp-on` 等软链接） |
+| `pw-mcp-serve` | 由 systemd 调用，把 Playwright MCP 转成 streamableHttp |
+
+### 两个必须知道的坑
+
+**1. snap 应用不能由 root 直接 fork。**
+用 `runuser` 启动 snap 包会被 snap-confine 拒绝：
+
+```
+/user.slice/user-0.slice/session-907.scope is not a snap cgroup for tag snap.chromium.chromium
+```
+
+必须经由**用户自己的 systemd** 启动（也就是桌面应用正常走的那条路）：
+
+```bash
+runuser -u <user> -- env XDG_RUNTIME_DIR=/run/user/<uid> \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus \
+    systemd-run --user --collect --unit=pwbrowser \
+        --setenv=DISPLAY=:10 --setenv=XAUTHORITY=/home/<user>/.Xauthority \
+        /snap/bin/chromium --remote-debugging-port=9222 \
+        --user-data-dir=/home/<user>/snap/chromium/common/chromium
+```
+
+`pwbrowser` 已经把这套封好了。另外**必须用目标用户身份跑**，
+否则 root 会在他的 profile 里写一堆 root 属主的文件。
+
+**2. 别用 `PLAYWRIGHT_` 前缀的环境变量。**
+`playwright-mcp` 自己会读 `PLAYWRIGHT_MCP_PORT`，一读到就**从 stdio 切换成 HTTP 监听模式**，
+然后跟 supergateway 抢同一个端口，子进程直接 `EADDRINUSE` 崩掉。
+
+症状很有迷惑性：supergateway 活着、端口也通、`initialize` 甚至返回 200 和一个 session id，
+但**响应体是空的**，后续所有请求都报 `No valid session ID provided`。
+所以本项目一律用 `PWMCP_` 前缀。
+
+### 前提与限制
+
+- 需要先有桌面（X 显示）。没有 X 就没地方画 headed 浏览器。
+- Chromium 是**单实例**的：如果他本人已经开着一个（没带调试端口），
+  再启一个同 profile 的只会把参数转发过去然后退出，端口不会开。
+  `pwbrowser` 会检测并重启，**标签页会恢复，但没提交的表单会丢**。
+- 模型拿到的是这个浏览器的**完整控制权，包括已登录的账号**。所以：
+  单独一道密码、单独的令牌、`/oauth/revoke` 随时能撤，别和 shell 通道共用。
+- 不需要 X 的场合（纯抓取）改用 `--headless` + `--isolated` 起独立 profile，
+  别去动用户的浏览器。
 
 ## 测试
 

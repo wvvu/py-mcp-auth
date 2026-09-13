@@ -1,0 +1,14 @@
+# 这个网关背后接的不是 SSH 目标，而是桌面上的浏览器。
+#
+# 管理页会把这个文件当成「目标机器」渲染出来。这里只是把真实情况写清楚 ——
+# 免得看到这个入口的人以为它也能开 shell（那是 host.example.com 那个网关的事）。
+#
+# 实际链路：
+#   browser.example.com → 网关(:18013) → Playwright MCP(:18012) → CDP(:9222)
+#                     → 桌面用户 user 的 Chromium（含其登录态）
+
+[ssh_servers.desktop-browser]
+description = "桌面用户 user 的 Chromium（CDP 接管，带其 cookie / 登录态）"
+host        = "127.0.0.1"
+port        = 9222
+user        = "user"

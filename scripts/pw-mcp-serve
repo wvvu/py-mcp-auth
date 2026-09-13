@@ -1,0 +1,27 @@
+#!/bin/bash
+# pw-mcp-serve —— 把 Playwright MCP 接在桌面浏览器上，转成 streamableHttp。
+#                  由 playwright-mcp.service 调用，一般不用手敲。
+#
+# 注意 --cdp-endpoint：它不自己启动浏览器，而是接管 pwbrowser 已经开好的那个。
+# 所以模型操作的就是桌面用户本人的浏览器（cookie / 登录态都在）。
+#
+# ⚠️ 环境变量别用 PLAYWRIGHT_ 前缀！
+#    playwright-mcp 自己会读 PLAYWRIGHT_MCP_PORT，一读到就切换成 HTTP 监听模式，
+#    然后跟 supergateway 抢同一个端口，子进程直接 EADDRINUSE 崩掉 ——
+#    表现为 initialize 只回 session 头、响应体是空的，后面全部
+#    "No valid session ID provided"。所以这里一律用 PWMCP_ 前缀。
+set -euo pipefail
+
+CDP="${PWMCP_CDP:-http://127.0.0.1:9222}"
+PORT="${PWMCP_PORT:-18012}"
+VIEWPORT="${PWMCP_VIEWPORT:-1440x900}"
+
+exec supergateway \
+    --stdio "playwright-mcp --no-sandbox --isolated --cdp-endpoint $CDP --viewport-size $VIEWPORT" \
+    --outputTransport streamableHttp \
+    --port "$PORT" \
+    --streamableHttpPath /mcp \
+    --stateful \
+    --sessionTimeout 900000 \
+    --healthEndpoint /healthz \
+    --logLevel info

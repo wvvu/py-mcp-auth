@@ -1,0 +1,105 @@
+#!/bin/bash
+# pwmcp —— 浏览器自动化通道的开关。
+#
+#   pwmcp on      确保桌面浏览器带 CDP 起来 + 启动 Playwright MCP
+#   pwmcp off     停掉 Playwright MCP（浏览器留着，你自己关）
+#   pwmcp status  看当前状态（含子进程有没有崩）
+#   pwmcp browser 只起浏览器，不起 MCP
+#
+# 也可以直接敲 pwmcp-on / pwmcp-off / pwmcp-status（同名软链接）。
+#
+# 前提：桌面已经起来（敲 shangji，并且至少用 RDP 连进去过一次，
+#       否则没有 X 显示，浏览器无处可画）。
+#
+# 环境变量一律用 PWMCP_ 前缀 —— 别用 PLAYWRIGHT_*，
+# playwright-mcp 自己会读 PLAYWRIGHT_MCP_PORT 并切成 HTTP 监听模式，
+# 那会跟 supergateway 抢端口，子进程直接崩。
+set -euo pipefail
+
+SVC=playwright-mcp.service
+MCP_PORT="${PWMCP_PORT:-18012}"
+CDP_PORT="${PWB_CDP_PORT:-9222}"
+
+case "$(basename "$0")" in
+    pwmcp-on)     ACTION=on ;;
+    pwmcp-off)    ACTION=off ;;
+    pwmcp-status) ACTION=status ;;
+    *)            ACTION="${1:-status}" ;;
+esac
+
+mcp_up() { curl -sf -m 2 "http://127.0.0.1:$MCP_PORT/healthz" >/dev/null 2>&1; }
+cdp_up() { curl -sf -m 2 "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1; }
+
+browser_version() {
+    curl -sf -m 2 "http://127.0.0.1:$CDP_PORT/json/version" 2>/dev/null \
+        | sed -n 's/.*"Browser": *"\([^"]*\)".*/\1/p'
+}
+
+# 子进程崩没崩 —— 只看端口是不够的：supergateway 自己活着、端口也通，
+# 但底下的 playwright-mcp 早就 EADDRINUSE 死掉了，这种最坑。
+child_errors() {
+    journalctl -u "$SVC" --no-pager -n 200 2>/dev/null \
+        | grep -c 'Child exited' || true
+}
+
+do_on() {
+    if cdp_up; then
+        echo "[=] 浏览器已就绪：$(browser_version) @ 127.0.0.1:$CDP_PORT"
+    else
+        pwbrowser || return 1
+    fi
+    echo "[*] 启动 Playwright MCP ..."
+    systemctl restart "$SVC"
+    for _ in $(seq 1 20); do
+        if mcp_up; then
+            echo "[+] 通道已开。"
+            echo "    MCP 入口: http://127.0.0.1:$MCP_PORT/mcp"
+            echo "    模型侧走: https://browser.example.com/mcp"
+            echo
+            echo "    自检（完整走一遍 OAuth + 驱动浏览器）:"
+            echo "      /opt/mcp-oauth-browser/venv/bin/python /root/e2e_test.py"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "[-] MCP 没起来。看日志：journalctl -u $SVC -n 30 --no-pager" >&2
+    return 1
+}
+
+do_off() {
+    systemctl stop "$SVC" 2>/dev/null || true
+    echo "[+] Playwright MCP 已停。浏览器还开着（要关就自己关，或敲 xiaji 连桌面一起下）。"
+}
+
+do_status() {
+    printf '%-24s %s\n' "桌面 CDP (:$CDP_PORT)" \
+        "$(cdp_up && echo "就绪  $(browser_version)" || echo '未就绪')"
+    printf '%-24s %s\n' "Playwright MCP" \
+        "$(systemctl is-active "$SVC" 2>/dev/null || echo unknown)$(mcp_up && echo '  (端口通)' || echo '  (端口不通)')"
+
+    local errs
+    errs="$(child_errors)"
+    if [ "$errs" -gt 0 ]; then
+        printf '%-24s \033[33m%s\033[0m\n' "子进程异常" \
+            "最近日志里有 $errs 次 Child exited —— 通道可能是坏的"
+    else
+        printf '%-24s %s\n' "子进程异常" "无"
+    fi
+
+    printf '%-24s %s\n' "OAuth 网关" \
+        "$(systemctl is-active mcp-oauth-browser 2>/dev/null || echo unknown)"
+    printf '%-24s %s\n' "桌面 (xrdp)" \
+        "$(systemctl is-active xrdp 2>/dev/null || echo unknown)"
+    echo
+    echo "排查入口:"
+    echo "  journalctl -u $SVC -n 30 --no-pager"
+    echo "  runuser -u user -- env XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u pwbrowser -n 30 --no-pager"
+}
+
+case "$ACTION" in
+    on)      do_on ;;
+    off)     do_off ;;
+    status)  do_status ;;
+    browser) pwbrowser ;;
+    *)       echo "用法: pwmcp {on|off|status|browser}" >&2; exit 2 ;;
+esac

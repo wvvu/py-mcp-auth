@@ -1,13 +1,14 @@
-# 反代示例（Caddy）。网关自己只监听 127.0.0.1:18011，TLS 和域名都交给反代。
+# 反代示例（Caddy）。网关自己只监听 127.0.0.1，TLS 和域名都交给反代。
 #
-# 想让「一个网关 + 多个上游」各自有独立域名，就写多个 site block，
-# 网关侧用 MCP_PUBLIC_BASES 白名单配合（见 README「多资源」一节）。
+# 两条通道是**两个独立的网关实例**（独立端口 / 状态目录 / 密码 / 令牌），
+# 各自一个域名，各自一条反代规则。
 
-mcp.example.com {
+# shell 通道：网关 :18011 → supergateway :18010 → mcp-ssh-manager
+host.example.com {
 	reverse_proxy 127.0.0.1:18011
 }
 
-# 第二个上游（例如浏览器自动化）单独一个域名：
-# browser.example.com {
-# 	reverse_proxy 127.0.0.1:18011
-# }
+# 浏览器通道：网关 :18013 → Playwright MCP :18012 → CDP :9222 → 桌面上的 Chromium
+browser.example.com {
+	reverse_proxy 127.0.0.1:18013
+}

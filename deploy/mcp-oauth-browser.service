@@ -1,0 +1,36 @@
+# /etc/systemd/system/mcp-oauth-browser.service
+#
+# 浏览器通道的 OAuth 网关 —— 和 shell 那个（mcp-oauth-gateway.service）
+# 是**完全独立的两份实例**：
+#
+#   端口      18013              vs  18011
+#   状态目录  /etc/mcp-browser   vs  /etc/mcp-ssh
+#   密码      .mcp-oauth-browser-password  vs  .mcp-oauth-password
+#   令牌      各自一套，互不通用
+#   上游      127.0.0.1:18012 (Playwright MCP)  vs  18010 (ssh MCP)
+#
+# 故意不复用：两边权限面完全不同（一边是 root shell，一边是你带登录态的浏览器）。
+# 就算哪天一个的令牌泄露了，也跨不到另一边去。
+[Unit]
+Description=mcp-oauth-browser (OAuth 2.1 in front of the Playwright MCP)
+After=network.target playwright-mcp.service
+Wants=playwright-mcp.service
+
+[Service]
+Environment=MCP_UPSTREAM=http://127.0.0.1:18012/mcp
+Environment=MCP_OAUTH_STATE=/etc/mcp-browser/oauth
+Environment=MCP_OAUTH_PORT=18013
+Environment=MCP_PUBLIC_BASE=https://browser.example.com
+Environment=MCP_OAUTH_PASSWORD_HINT=/root/.mcp-oauth-browser-password
+# 管理页那张「目标机器」卡片读这个文件。这里指向一份描述浏览器通道的说明，
+# 免得它去读 ssh 的目标清单、让人以为这个网关也能开 shell。
+Environment=MCP_SSH_CONFIG=/etc/mcp-browser/targets.toml
+ExecStart=/opt/mcp-oauth-browser/venv/bin/python /opt/mcp-oauth-browser/mcp_oauth_gateway.py
+Restart=always
+RestartSec=3
+# 明文口只留给本机（HTTPS 由 Caddy 终结）
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

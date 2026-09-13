@@ -1,0 +1,29 @@
+# /etc/systemd/system/playwright-mcp.service
+#
+# Playwright MCP，接在桌面浏览器（pwbrowser 起的那个）的 CDP 端口上。
+#
+# 它本身不启动浏览器 —— 浏览器由 pwbrowser 以桌面用户身份启动。
+# 所以这个服务可以先跑着：真正的连接是在模型第一次用到浏览器时才建立的。
+#
+# ⚠️ 环境变量前缀是 PWMCP_，不能叫 PLAYWRIGHT_*：
+#    playwright-mcp 自己会读 PLAYWRIGHT_MCP_PORT，一读到就切成 HTTP 监听模式，
+#    然后跟 supergateway 抢端口 → 子进程 EADDRINUSE 崩溃。
+[Unit]
+Description=Playwright MCP over CDP (attached to the desktop browser)
+After=network.target
+
+[Service]
+Environment=PWMCP_CDP=http://127.0.0.1:9222
+Environment=PWMCP_PORT=18012
+ExecStart=/usr/local/bin/pw-mcp-serve
+Restart=always
+RestartSec=3
+# 页面内容可能落到产物目录里，别让同组用户读到
+UMask=0027
+# supergateway 只会绑 0.0.0.0，用 cgroup 级过滤限成本机访问。
+# 这个进程只需要连 127.0.0.1:9222，不需要任何对外网络。
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target
