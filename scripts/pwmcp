@@ -37,8 +37,12 @@ browser_version() {
 
 # 子进程崩没崩 —— 只看端口是不够的：supergateway 自己活着、端口也通，
 # 但底下的 playwright-mcp 早就 EADDRINUSE 死掉了，这种最坑。
+# 只统计「本次服务启动之后」的崩溃，否则历史故障会一直报假警报。
 child_errors() {
-    journalctl -u "$SVC" --no-pager -n 200 2>/dev/null \
+    local since
+    since="$(systemctl show "$SVC" -p ActiveEnterTimestamp --value 2>/dev/null)"
+    [ -n "$since" ] || return 0
+    journalctl -u "$SVC" --since "$since" --no-pager 2>/dev/null \
         | grep -c 'Child exited' || true
 }
 
