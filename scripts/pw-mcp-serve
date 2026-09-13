@@ -5,6 +5,14 @@
 # 注意 --cdp-endpoint：它不自己启动浏览器，而是接管 pwbrowser 已经开好的那个。
 # 所以模型操作的就是桌面用户本人的浏览器（cookie / 登录态都在）。
 #
+# ⚠️ 千万不要加 --isolated！
+#    加了之后 playwright-mcp 会新建一个**独立的浏览器上下文**（相当于隐身窗口）：
+#      - 那个上下文里 cookie 是空的（实测 0 条，而默认上下文有 55 条）
+#      - 于是模型拿不到用户的登录态，整个"吃你的浏览器绕验证码"就白做了
+#      - 而且它和你自己的窗口是两个窗口 —— 会出现"我看到的和模型操作的不是一个"
+#    --isolated 只在「Playwright 自己启动浏览器」时才需要（用来绕
+#    "Browser is already in use" 的 profile 锁）。走 CDP 接管时纯粹有害。
+#
 # ⚠️ 环境变量别用 PLAYWRIGHT_ 前缀！
 #    playwright-mcp 自己会读 PLAYWRIGHT_MCP_PORT，一读到就切换成 HTTP 监听模式，
 #    然后跟 supergateway 抢同一个端口，子进程直接 EADDRINUSE 崩掉 ——
@@ -14,10 +22,9 @@ set -euo pipefail
 
 CDP="${PWMCP_CDP:-http://127.0.0.1:9222}"
 PORT="${PWMCP_PORT:-18012}"
-VIEWPORT="${PWMCP_VIEWPORT:-1440x900}"
 
 exec supergateway \
-    --stdio "playwright-mcp --no-sandbox --isolated --cdp-endpoint $CDP --viewport-size $VIEWPORT" \
+    --stdio "playwright-mcp --no-sandbox --cdp-endpoint $CDP" \
     --outputTransport streamableHttp \
     --port "$PORT" \
     --streamableHttpPath /mcp \
