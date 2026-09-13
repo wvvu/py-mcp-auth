@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 状态文件 —— 这些是运行时数据，绝不能进仓库
+state/
+tokens.json
+tokens.json.*
+clients.json
+clients.json.*
+password.json
+password.json.*
+*.prehash.*.bak
+
+# 明文密码便利文件
+.mcp-oauth-password
+
+# Playwright / MCP 运行产物
+.playwright-mcp/
+output/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store

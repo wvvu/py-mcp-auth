@@ -1,0 +1,16 @@
+# mcp-ssh-manager 的审计日志。模型在这台机器上执行过的每条命令都会落在这里。
+# 用 logrotate 兜住大小，别让它把盘吃满。
+/var/log/mcp-ssh/audit.jsonl {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+    sharedscripts
+    postrotate
+        # 文件是按调用追加打开的，不需要通知进程重开 fd。
+        true
+    endscript
+}

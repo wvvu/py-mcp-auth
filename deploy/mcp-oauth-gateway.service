@@ -1,0 +1,27 @@
+# /etc/systemd/system/mcp-oauth-gateway.service
+#
+# 占位符按实际环境替换：
+#   <PUBLIC_HOST>  网关对外域名，例如 mcp.example.com
+#   <UPSTREAM>     被保护的上游，例如 http://127.0.0.1:18010/mcp
+[Unit]
+Description=mcp-oauth-gateway (OAuth 2.1 in front of an unauthenticated MCP HTTP endpoint)
+After=network.target
+
+[Service]
+Environment=MCP_UPSTREAM=<UPSTREAM>
+Environment=MCP_OAUTH_STATE=/etc/mcp-ssh/oauth
+Environment=MCP_OAUTH_PORT=18011
+# issuer 和令牌里的 resource 钉死在公网地址上。
+# RFC 8414 要求 issuer 稳定 —— 从 Host 头推导的话，换个入口就会签发
+# 不同 resource 的令牌，客户端按 issuer 缓存元数据，结果是反复重新授权。
+Environment=MCP_PUBLIC_BASE=https://<PUBLIC_HOST>
+ExecStart=/opt/mcp-oauth/venv/bin/python /opt/mcp-oauth/mcp_oauth_gateway.py
+Restart=always
+RestartSec=3
+# 明文口只留给本机（HTTPS 由反代终结）。
+# 注意：上游 supergateway 只会绑 0.0.0.0，所以这层 cgroup 过滤不是可选项。
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

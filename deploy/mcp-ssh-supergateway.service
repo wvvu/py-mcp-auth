@@ -1,0 +1,18 @@
+# /etc/systemd/system/mcp-ssh-supergateway.service
+[Unit]
+Description=mcp-ssh-manager via supergateway (stdio->streamableHttp, localhost only)
+After=network.target
+
+[Service]
+Environment=SSH_CONFIG_PATH=/etc/mcp-ssh/ssh-config.toml
+ExecStart=/usr/local/bin/supergateway --stdio "node /usr/local/lib/node_modules/mcp-ssh-manager/src/index.js" --outputTransport streamableHttp --port 18010 --streamableHttpPath /mcp --stateful --sessionTimeout 900000 --healthEndpoint /healthz --logLevel info
+Restart=always
+RestartSec=3
+# 审计日志里会有模型执行过的命令原文，别让同组用户读到。
+UMask=0027
+# supergateway 只会绑 0.0.0.0，用 cgroup 级过滤把 18010 限成本机访问
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

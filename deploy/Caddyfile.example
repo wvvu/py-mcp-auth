@@ -1,0 +1,13 @@
+# 反代示例（Caddy）。网关自己只监听 127.0.0.1:18011，TLS 和域名都交给反代。
+#
+# 想让「一个网关 + 多个上游」各自有独立域名，就写多个 site block，
+# 网关侧用 MCP_PUBLIC_BASES 白名单配合（见 README「多资源」一节）。
+
+mcp.example.com {
+	reverse_proxy 127.0.0.1:18011
+}
+
+# 第二个上游（例如浏览器自动化）单独一个域名：
+# browser.example.com {
+# 	reverse_proxy 127.0.0.1:18011
+# }
