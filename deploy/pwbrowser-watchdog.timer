@@ -1,0 +1,15 @@
+# /etc/systemd/system/pwbrowser-watchdog.timer
+#
+# 由 pwmcp-on 启用、pwmcp-off 停用 —— 不要手动 enable，
+# 否则你想"彻底关掉"的时候浏览器会被一直拉起来。
+[Unit]
+Description=Run pwbrowser watchdog every minute
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=60
+AccuracySec=5s
+Unit=pwbrowser-watchdog.service
+
+[Install]
+WantedBy=timers.target

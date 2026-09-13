@@ -114,6 +114,7 @@ python3 -m venv /opt/mcp-oauth/venv
 - `mcp-oauth-browser.service` — 浏览器通道的网关（同一份代码的第二个实例）
 - `mcp-ssh-supergateway.service` — 把 stdio MCP 服务转成 streamableHttp（含 `UMask=0027`）
 - `playwright-mcp.service` — Playwright MCP over CDP
+- `pwbrowser-watchdog.service` / `.timer` — 看门狗，浏览器被关掉自动拉回来
 - `mcp-oauth-admin.fail2ban.conf` — 密码爆破封 IP
 - `mcp-ssh-audit.logrotate` — 审计日志轮转
 - `targets.toml.example` — 浏览器通道管理页里那张「目标」卡片的说明文件
@@ -179,9 +180,27 @@ browser.example.com
 
 | 脚本 | 作用 |
 |---|---|
-| `pwbrowser` | 以桌面用户身份、在他的 X 显示上启动带 CDP 端口的 Chromium，用他现有的 profile |
+| `pwbrowser` | 以桌面用户身份、在他的 X 显示上启动带 CDP 端口的 Chromium，用他现有的 profile。**幂等**，可当看门狗反复调用 |
 | `pwmcp` | 开关：`on` / `off` / `status` / `browser`（也有 `pwmcp-on` 等软链接） |
 | `pw-mcp-serve` | 由 systemd 调用，把 Playwright MCP 转成 streamableHttp |
+
+### 开和关的语义（重要）
+
+```
+pwmcp-on   起浏览器 + 起 MCP + 开看门狗
+pwmcp-off  关看门狗 + 停 MCP + 关浏览器
+```
+
+**`off` 会把浏览器也关掉** —— 想彻底停就敲它，别只关浏览器窗口。
+
+为什么需要看门狗（`pwbrowser-watchdog.timer`）：模型是靠 `--cdp-endpoint` 连
+`127.0.0.1:9222` 的。只要浏览器不在（哪怕只是被手动关了窗口），模型就报
+`connect ECONNREFUSED 127.0.0.1:9222`；而此时 supergateway 和网关都是好的，
+从外面完全看不出问题出在哪。看门狗每分钟跑一次幂等的 `pwbrowser`，
+浏览器被关掉会自动拉回来（实测 ~60 秒内恢复）。
+
+看门狗由 `pwmcp-on` 启用、`pwmcp-off` 停用，**不要手动 enable** ——
+否则你想彻底关掉的时候浏览器会被一直拉起来。
 
 ### 两个必须知道的坑
 

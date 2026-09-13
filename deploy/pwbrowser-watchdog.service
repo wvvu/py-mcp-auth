@@ -1,0 +1,21 @@
+# /etc/systemd/system/pwbrowser-watchdog.service
+#
+# 看门狗：把桌面浏览器的 CDP 端口保持在"活着"的状态。
+#
+# 为什么需要它：模型那边是靠 --cdp-endpoint 连 127.0.0.1:9222 的。
+# 只要浏览器不在（哪怕只是被手动关掉了窗口），模型就会报
+# connect ECONNREFUSED 127.0.0.1:9222 —— 而 supergateway 和网关都是好的，
+# 从外面完全看不出来问题出在哪。
+#
+# pwbrowser 本身是幂等的：CDP 活着就什么都不做，所以每分钟跑一次没有代价。
+# 桌面没起来（敲过 xiaji）时会静默退出，不会刷日志。
+[Unit]
+Description=pwbrowser watchdog (keep the desktop browser's CDP port alive)
+After=network.target
+
+[Service]
+Type=oneshot
+Environment=PWB_QUIET=1
+ExecStart=/usr/local/bin/pwbrowser --quiet
+# 启动失败（比如桌面没起来）不该让 timer 进 failed 状态反复报警
+SuccessExitStatus=0 1

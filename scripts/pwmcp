@@ -1,12 +1,17 @@
 #!/bin/bash
 # pwmcp —— 浏览器自动化通道的开关。
 #
-#   pwmcp on      确保桌面浏览器带 CDP 起来 + 启动 Playwright MCP
-#   pwmcp off     停掉 Playwright MCP（浏览器留着，你自己关）
-#   pwmcp status  看当前状态（含子进程有没有崩）
+#   pwmcp on      起浏览器（带 CDP）+ 启动 Playwright MCP + 开看门狗
+#   pwmcp off     关看门狗 + 停 MCP + 关浏览器（明确的"不玩了"）
+#   pwmcp status  看当前状态（含子进程有没有崩、看门狗在不在）
 #   pwmcp browser 只起浏览器，不起 MCP
 #
 # 也可以直接敲 pwmcp-on / pwmcp-off / pwmcp-status（同名软链接）。
+#
+# 心智模型：
+#   on  = 通道开着，浏览器常驻。你手动把浏览器窗口关掉，看门狗会在 1 分钟内
+#         把它拉回来 —— 免得模型那边报 connect ECONNREFUSED 127.0.0.1:9222。
+#   off = 通道关掉，浏览器也关掉。想彻底停就敲这个，别只关窗口。
 #
 # 前提：桌面已经起来（敲 shangji，并且至少用 RDP 连进去过一次，
 #       否则没有 X 显示，浏览器无处可画）。
@@ -17,8 +22,10 @@
 set -euo pipefail
 
 SVC=playwright-mcp.service
+WD=pwbrowser-watchdog.timer
 MCP_PORT="${PWMCP_PORT:-18012}"
 CDP_PORT="${PWB_CDP_PORT:-9222}"
+TARGET_USER="${PWB_USER:-user}"
 
 case "$(basename "$0")" in
     pwmcp-on)     ACTION=on ;;
@@ -46,12 +53,36 @@ child_errors() {
         | grep -c 'Child exited' || true
 }
 
+close_browser() {
+    local uid runtime
+    uid="$(id -u "$TARGET_USER")"
+    runtime="/run/user/$uid"
+    runuser -u "$TARGET_USER" -- env XDG_RUNTIME_DIR="$runtime" \
+        systemctl --user stop pwbrowser.service >/dev/null 2>&1 || true
+    local p
+    for p in $(ps -eo pid,user,cmd 2>/dev/null \
+               | awk -v u="$TARGET_USER" \
+                   '$2==u && /snap\/chromium\/.*chromium-browser\/chrome/ {print $1}'); do
+        kill "$p" 2>/dev/null || true
+    done
+    sleep 2
+    for p in $(ps -eo pid,user,cmd 2>/dev/null \
+               | awk -v u="$TARGET_USER" \
+                   '$2==u && /snap\/chromium\/.*chromium-browser\/chrome/ {print $1}'); do
+        kill -9 "$p" 2>/dev/null || true
+    done
+}
+
 do_on() {
     if cdp_up; then
         echo "[=] 浏览器已就绪：$(browser_version) @ 127.0.0.1:$CDP_PORT"
     else
         pwbrowser || return 1
     fi
+
+    systemctl enable --now "$WD" >/dev/null 2>&1 || true
+    echo "[*] 看门狗已开（每 60 秒检查，浏览器被关掉会自动拉回来）"
+
     echo "[*] 启动 Playwright MCP ..."
     systemctl restart "$SVC"
     for _ in $(seq 1 20); do
@@ -71,13 +102,16 @@ do_on() {
 }
 
 do_off() {
+    systemctl disable --now "$WD" >/dev/null 2>&1 || true
     systemctl stop "$SVC" 2>/dev/null || true
-    echo "[+] Playwright MCP 已停。浏览器还开着（要关就自己关，或敲 xiaji 连桌面一起下）。"
+    close_browser
+    echo "[+] 通道已关：看门狗停了、MCP 停了、浏览器也关了。"
+    echo "    想再开就敲 pwmcp-on。"
 }
 
 do_status() {
     printf '%-24s %s\n' "桌面 CDP (:$CDP_PORT)" \
-        "$(cdp_up && echo "就绪  $(browser_version)" || echo '未就绪')"
+        "$(cdp_up && echo "就绪  $(browser_version)" || echo '未就绪  ← 模型会报 ECONNREFUSED，敲 pwmcp-on')"
     printf '%-24s %s\n' "Playwright MCP" \
         "$(systemctl is-active "$SVC" 2>/dev/null || echo unknown)$(mcp_up && echo '  (端口通)' || echo '  (端口不通)')"
 
@@ -90,6 +124,8 @@ do_status() {
         printf '%-24s %s\n' "子进程异常" "无"
     fi
 
+    printf '%-24s %s\n' "看门狗" \
+        "$(systemctl is-active "$WD" 2>/dev/null || echo inactive)$(systemctl is-enabled "$WD" >/dev/null 2>&1 && echo '  (已启用，浏览器关了会自动拉回来)' || echo '  (未启用)')"
     printf '%-24s %s\n' "OAuth 网关" \
         "$(systemctl is-active mcp-oauth-browser 2>/dev/null || echo unknown)"
     printf '%-24s %s\n' "桌面 (xrdp)" \

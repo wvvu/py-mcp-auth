@@ -2,6 +2,8 @@
 # pwbrowser —— 在桌面用户的会话里启动一个带 CDP 调试端口的 Chromium，
 #              用的是他本人那个 profile（cookie / 登录态都在里面）。
 #
+# 幂等：CDP 已经活着就什么都不做。所以可以放心地当看门狗反复调用。
+#
 # 为什么绕这么一圈：
 #   1. snap 应用不能由 root 直接 fork —— snap-confine 会拒绝，报
 #      "is not a snap cgroup"。必须经由用户自己的 systemd 启动，
@@ -11,6 +13,7 @@
 #
 # 用法:
 #   pwbrowser                 # 就绪就跳过，没就绪就启动
+#   pwbrowser --quiet         # 看门狗模式：无事发生就完全静默
 #   PWB_CDP_PORT=9223 pwbrowser
 #   PWB_DISPLAY=:11 pwbrowser # 手动指定显示
 set -euo pipefail
@@ -22,6 +25,13 @@ BROWSER="${PWB_BROWSER:-/snap/bin/chromium}"
 UNIT="${PWB_UNIT:-pwbrowser}"
 WAIT="${PWB_TIMEOUT:-40}"
 XAUTH="${PWB_XAUTHORITY:-/home/$TARGET_USER/.Xauthority}"
+
+QUIET=0
+[ "${PWB_QUIET:-0}" = "1" ] && QUIET=1
+[ "${1:-}" = "--quiet" ] && QUIET=1
+
+say()  { [ "$QUIET" = "1" ] || echo "$@"; }
+warn() { echo "$@" >&2; }
 
 UID_TARGET="$(id -u "$TARGET_USER")"
 RUNTIME_DIR="/run/user/$UID_TARGET"
@@ -50,14 +60,17 @@ detect_display() {
 }
 
 if cdp_up; then
-    echo "[=] CDP 已经在 http://127.0.0.1:$PORT 上跑着，不重复启动"
+    say "[=] CDP 已经在 http://127.0.0.1:$PORT 上跑着，不重复启动"
     exit 0
 fi
 
 DISPLAY_NUM="${PWB_DISPLAY:-$(detect_display)}"
 if [ -z "$DISPLAY_NUM" ]; then
-    echo "[-] 找不到 $TARGET_USER 的 X 显示。" >&2
-    echo "    先敲 shangji 起桌面，并且至少用 RDP 连进去一次。" >&2
+    # 桌面没起来。看门狗模式下静默退出 —— 敲过 xiaji 之后
+    # 这里每 60 秒吵一次没有意义。
+    warn "[-] 找不到 $TARGET_USER 的 X 显示。"
+    warn "    先敲 shangji 起桌面，并且至少用 RDP 连进去一次。"
+    [ "$QUIET" = "1" ] && exit 0
     exit 1
 fi
 
@@ -65,8 +78,8 @@ fi
 # 同 profile 的，新进程只会把参数转发给老进程然后自己退出 —— 端口不会开。
 # 所以必须先把老的关掉。
 if pgrep -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1; then
-    echo "[!] $TARGET_USER 已经开着一个 Chromium，但没带调试端口。"
-    echo "    正在关掉它再重开（标签页会恢复，没提交的表单会丢）。"
+    say "[!] $TARGET_USER 已经开着一个 Chromium，但没带调试端口。"
+    say "    正在关掉它再重开（标签页会恢复，没提交的表单会丢）。"
     as_user systemctl --user stop "$UNIT.service" >/dev/null 2>&1 || true
     pkill -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1 || true
     sleep 3
@@ -74,8 +87,8 @@ if pgrep -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/nu
     sleep 1
 fi
 
-echo "[*] 在 $DISPLAY_NUM 上启动 Chromium"
-echo "    用户: $TARGET_USER    profile: $PROFILE    CDP: 127.0.0.1:$PORT"
+say "[*] 在 $DISPLAY_NUM 上启动 Chromium"
+say "    用户: $TARGET_USER    profile: $PROFILE    CDP: 127.0.0.1:$PORT"
 
 as_user systemd-run --user --collect --unit="$UNIT" \
     --setenv=DISPLAY="$DISPLAY_NUM" \
@@ -91,12 +104,12 @@ as_user systemd-run --user --collect --unit="$UNIT" \
 
 for _ in $(seq 1 "$WAIT"); do
     if cdp_up; then
-        echo "[+] 就绪：CDP 在 http://127.0.0.1:$PORT（显示 $DISPLAY_NUM，用户 $TARGET_USER）"
+        say "[+] 就绪：CDP 在 http://127.0.0.1:$PORT（显示 $DISPLAY_NUM，用户 $TARGET_USER）"
         exit 0
     fi
     sleep 1
 done
 
-echo "[-] 等了 $WAIT 秒没等到 CDP 端点。看日志：" >&2
+warn "[-] 等了 $WAIT 秒没等到 CDP 端点。看日志："
 as_user journalctl --user -u "$UNIT" -n 20 --no-pager >&2 2>/dev/null || true
 exit 1
