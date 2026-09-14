@@ -45,9 +45,41 @@ as_user() {
 
 cdp_up() { curl -sf -m 2 "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1; }
 
-# 取属于目标用户、编号最大的那个 X socket。
-# xrdp 每次会话分配 :10、:11……；取最大号一般就是最新的那个会话。
+# 找出「目标用户真正在看的那块屏」。
+#
+# ⚠️ 千万别用「编号最大的 X socket」——那是上一版的写法，害惨过一次：
+#    调试时手工起的一个 Xvfb :11 编号比真桌面 :10 大，于是看门狗把浏览器
+#    启到了那个看不见的虚拟屏上；模型照样能操作（CDP 通），但用户屏幕上
+#    什么都没有，表现为「我看到的和模型操作的不是一个」。
+#
+# 优先级：
+#   1. logind 里该用户「活跃的 x11 会话」的 Display 字段 —— 最权威
+#   2. 窗口管理器进程（kwin/plasmashell/openbox）的 DISPLAY —— 有 WM 才是真桌面
+#   3. 兜底：编号最大的 socket（老行为，只在上面两条都问不出来时用）
 detect_display() {
+    local s d typ
+
+    for s in $(loginctl list-sessions --no-pager 2>/dev/null \
+               | awk -v u="$TARGET_USER" '$3==u {print $1}'); do
+        typ=$(loginctl show-session "$s" -p Type --value 2>/dev/null)
+        [ "$typ" = "x11" ] || continue
+        d=$(loginctl show-session "$s" -p Display --value 2>/dev/null)
+        case "$d" in
+            ""|"-"|" ") continue ;;
+        esac
+        printf '%s' "$d"
+        return
+    done
+
+    local p
+    for p in $(pgrep -u "$TARGET_USER" -x kwin_x11 2>/dev/null) \
+             $(pgrep -u "$TARGET_USER" -x plasmashell 2>/dev/null) \
+             $(pgrep -u "$TARGET_USER" -x openbox 2>/dev/null) \
+             $(pgrep -u "$TARGET_USER" -x xfwm4 2>/dev/null); do
+        d=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p')
+        [ -n "$d" ] && { printf '%s' "$d"; return; }
+    done
+
     local best="" n owner
     for s in /tmp/.X11-unix/X*; do
         [ -e "$s" ] || continue
