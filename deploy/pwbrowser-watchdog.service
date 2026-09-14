@@ -18,4 +18,4 @@ Type=oneshot
 Environment=PWB_QUIET=1
 ExecStart=/usr/local/bin/pwbrowser --quiet
 # 启动失败（比如桌面没起来）不该让 timer 进 failed 状态反复报警
-SuccessExitStatus=0 1
+SuccessExitStatus=0 1 2

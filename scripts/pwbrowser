@@ -26,6 +26,21 @@ UNIT="${PWB_UNIT:-pwbrowser}"
 WAIT="${PWB_TIMEOUT:-40}"
 XAUTH="${PWB_XAUTHORITY:-/home/$TARGET_USER/.Xauthority}"
 
+# Chromium 启动参数（可覆盖）。
+#
+# ⚠️ 2026-09-14 实测记录（别再走弯路了）：
+#   试过 --disable-gpu / --process-per-site / --js-flags，结果是**负优化**：
+#     Chromium RSS 1114MB → 1563MB，多吃了 449MB。原因：
+#       - --disable-gpu     Chromium 152 已废弃它，GPU 进程照样起（139MB），
+#                           只是降级成软件渲染，反而更吃 CPU
+#       - --process-per-site 反向：它按「站点数」常驻 renderer。只开 1 个
+#                           标签时本来 1 个 renderer 就够，它却起了好几个
+#   所以这里默认留空 —— 不自作主张。只在标签开很多时才考虑临时加。
+#
+# 想临加参数： PWB_FLAGS="--disk-cache-size=67108864" pwbrowser
+DEFAULT_FLAGS=""
+FLAGS="${PWB_FLAGS-$DEFAULT_FLAGS}"
+
 QUIET=0
 [ "${PWB_QUIET:-0}" = "1" ] && QUIET=1
 [ "${1:-}" = "--quiet" ] && QUIET=1
@@ -106,17 +121,33 @@ if [ -z "$DISPLAY_NUM" ]; then
     exit 1
 fi
 
-# Chromium 是单实例的：如果他已经开着一个（没带调试端口），我们再启一个
-# 同 profile 的，新进程只会把参数转发给老进程然后自己退出 —— 端口不会开。
-# 所以必须先把老的关掉。
+# Chromium 是单实例的：如果已经开着一个（没带调试端口），我们再启一个
+# 同 profile 的，新进程只会把参数转发给老进程然后自己退出 —— 端口永远不会开。
+#
+# 两种处置方式（PWB_FORCE 控制）：
+#   默认（温和）：不杀，直接报错退出。你手动开的窗口原封不动，数据不会丢。
+#                代价：端口起不来，模型连不上，得你自己关掉那个窗口再敲一次。
+#                看门狗会每分钟重试，一旦你关掉窗口它就会自动拉起带端口的那个。
+#   PWB_FORCE=1：杀掉重开。模型马上能用，但没提交的表单会丢。
+#                "我很确定那个 Chromium 没用，随便关"的时候用。
+FORCE="${PWB_FORCE:-0}"
 if pgrep -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1; then
-    say "[!] $TARGET_USER 已经开着一个 Chromium，但没带调试端口。"
-    say "    正在关掉它再重开（标签页会恢复，没提交的表单会丢）。"
-    as_user systemctl --user stop "$UNIT.service" >/dev/null 2>&1 || true
-    pkill -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1 || true
-    sleep 3
-    pkill -9 -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1 || true
-    sleep 1
+    if [ "$FORCE" = "1" ]; then
+        say "[!] $TARGET_USER 已开着一个无调试端口的 Chromium，PWB_FORCE=1 → 关掉重开"
+        as_user systemctl --user stop "$UNIT.service" >/dev/null 2>&1 || true
+        pkill -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1 || true
+        sleep 3
+        pkill -9 -u "$TARGET_USER" -f 'snap/chromium/.*chromium-browser/chrome' >/dev/null 2>&1 || true
+        sleep 1
+    else
+        warn "[!] $TARGET_USER 已开着一个 Chromium，但它没带调试端口。"
+        warn "    它占着 profile 锁，新的带端口实例起不来，模型连不上。"
+        warn "    我不会擅自杀掉它（怕丢你没提交的表单）。你二选一："
+        warn "      a) 自己关掉那个 Chromium 窗口，等看门狗自动拉起带端口的"
+        warn "      b) 敲： PWB_FORCE=1 pwbrowser   （我帮你关掉重开）"
+        [ "$QUIET" = "1" ] && exit 0
+        exit 2
+    fi
 fi
 
 say "[*] 在 $DISPLAY_NUM 上启动 Chromium"
@@ -131,7 +162,7 @@ as_user systemd-run --user --collect --unit="$UNIT" \
         --user-data-dir="$PROFILE" \
         --no-first-run \
         --no-default-browser-check \
-        --restore-last-session \
+        $FLAGS \
     >/dev/null
 
 for _ in $(seq 1 "$WAIT"); do
